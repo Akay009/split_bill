@@ -1,4 +1,5 @@
 streamlit==1.38.0
 python-dotenv==1.0.1
+chromedriver-autoinstaller
 webdriver-manager
 selenium
