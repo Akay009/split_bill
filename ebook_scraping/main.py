@@ -3,6 +3,9 @@ from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium import webdriver
+
 import pandas as pd
 import requests
 import chromedriver_autoinstaller
@@ -38,18 +41,19 @@ def get_total_hits(query):
 def search_pdfs(subject):
     query = f"{subject} filetype:pdf"
     search_url = f"https://www.google.com/search?q={query}"
+    driver = None
     chromedriver_autoinstaller.install()
-
+    chrome_options = webdriver.ChromeOptions()
 
     # Configure Selenium WebDriver
-    chrome_options = Options()
+    # chrome_options = Options()
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
 
-    driver_service = Service()  # ChromeDriver path is handled automatically by chromedriver-autoinstaller
-    driver = webdriver.Chrome(service=driver_service, options=chrome_options)
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()),
+                              options=chrome_options)
 
     # Open Google Search
     driver.get(search_url)
