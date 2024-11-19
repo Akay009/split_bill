@@ -5,6 +5,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 import pandas as pd
 import requests
+import chromedriver_autoinstaller
 from config import google_api_key, google_cse_id
 
 # Streamlit UI
@@ -37,6 +38,8 @@ def get_total_hits(query):
 def search_pdfs(subject):
     query = f"{subject} filetype:pdf"
     search_url = f"https://www.google.com/search?q={query}"
+    chromedriver_autoinstaller.install()
+
 
     # Configure Selenium WebDriver
     chrome_options = Options()
@@ -45,7 +48,7 @@ def search_pdfs(subject):
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
 
-    driver_service = Service("./chromedriver")  # Replace with the path to your ChromeDriver
+    driver_service = Service()  # ChromeDriver path is handled automatically by chromedriver-autoinstaller
     driver = webdriver.Chrome(service=driver_service, options=chrome_options)
 
     # Open Google Search
