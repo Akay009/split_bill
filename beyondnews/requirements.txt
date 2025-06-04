@@ -1,0 +1,9 @@
+streamlit==1.38.0
+extruct
+trafilatura
+jusText
+html2text
+inscriptis
+pandas
+requests
+bs4
