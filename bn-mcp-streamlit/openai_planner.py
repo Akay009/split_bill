@@ -34,7 +34,7 @@ Rules:
 - Never put api_key in arguments (MCP uses HTTP x-api-key).
 - Prefer **search_links** for web pages / news; **search_documents** for PDFs, agendas, minutes, attachments.
 - **search_links** requires **q** (string). Use rich keywords / boolean style from the explore reference. Omit **search_in** for broad "find all" unless the user restricts title vs body.
-- **search_documents** needs meaningful **keywords** when there is a topic. Use **keyword_operator** and / or **or** per API docs.
+- **search_documents** / **search_documents_post** match the MCP tools: required **q** (same NewsCatcher-style string as links: AND/OR/NOT, parentheses, phrases). Use **page** and **page_size** (not `size`). Filters: **sources**, **search_in**, **dynamic_search**, **theme**, **document_type** (not `doc_type`), **from_**, **to_**, **url_contains**, **parent_url**, **link_id**, **fields**, **sort_by**, **sort_order**. There is no **keywords** or **keyword_operator** — put terms in **q**.
 - **content_type** only if it appears in the content_type list in context (exact string).
 - **dynamic_search** on search_links (GET) must be a **string** of compact JSON, not a nested object.
 - Omit **fields** on search_links unless the user wants a slimmer response; without **fields**, the API returns full index rows (best for raw JSON). Use **fields** only to limit payload size.
@@ -63,6 +63,32 @@ def _strip_json_fence(text: str) -> str:
     return t
 
 
+def _normalize_documents_args(out: dict[str, Any]) -> dict[str, Any]:
+    """MCP search_documents* uses q + page_size (+ document_type, from_, to_, sources), not keywords/size."""
+    if "q" not in out and "keywords" in out:
+        kw = out.pop("keywords")
+        out["q"] = kw if isinstance(kw, str) else str(kw)
+    if "page_size" not in out and "size" in out:
+        out["page_size"] = out.pop("size")
+    if "sources" not in out and "domains" in out:
+        out["sources"] = out.pop("domains")
+    if "document_type" not in out and "doc_type" in out:
+        out["document_type"] = out.pop("doc_type")
+    if "from_" not in out and "date_from" in out:
+        out["from_"] = out.pop("date_from")
+    if "to_" not in out and "date_to" in out:
+        out["to_"] = out.pop("date_to")
+    for stale in ("keyword_operator", "exclude_keywords"):
+        out.pop(stale, None)
+    if "dynamic_search" in out:
+        ds = out["dynamic_search"]
+        if isinstance(ds, dict):
+            out["dynamic_search"] = json.dumps(ds, separators=(",", ":"), ensure_ascii=False)
+        elif ds == "":
+            del out["dynamic_search"]
+    return out
+
+
 def normalize_mcp_arguments(tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
     out = {k: v for k, v in dict(arguments).items() if k != "api_key" and v is not None}
     if tool == "search_links" and "dynamic_search" in out:
@@ -71,6 +97,8 @@ def normalize_mcp_arguments(tool: str, arguments: dict[str, Any]) -> dict[str, A
             out["dynamic_search"] = json.dumps(ds, separators=(",", ":"), ensure_ascii=False)
         elif ds == "":
             del out["dynamic_search"]
+    if tool in ("search_documents", "search_documents_post"):
+        out = _normalize_documents_args(out)
     return out
 
 

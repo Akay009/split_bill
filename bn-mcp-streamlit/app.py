@@ -14,7 +14,7 @@ import pandas as pd
 import streamlit as st
 
 from bn_client import BNClient
-from openai_planner import plan_mcp_call
+from openai_planner import normalize_mcp_arguments, plan_mcp_call
 from result_views import dataframe_for_st, render_aggregations, render_list_fields_clean, render_mcp_result
 from ui_shared import hero, inject_theme, sidebar_connection
 
@@ -36,8 +36,20 @@ MANUAL_DEFAULTS: dict[str, dict] = {
     "links_aggregations": {"facet": "content_type", "agg_size": 50},
     "search_links": {"q": "*", "page": 1, "page_size": 10, "sort_by": "date", "sort_order": "desc"},
     "search_links_post": {"q": "*", "page": 1, "page_size": 10, "sort_by": "date", "sort_order": "desc"},
-    "search_documents": {"page": 1, "size": 10, "keyword_operator": "and"},
-    "search_documents_post": {"page": 1, "size": 10, "keyword_operator": "and"},
+    "search_documents": {
+        "q": "(agenda OR meeting) AND US",
+        "page": 1,
+        "page_size": 10,
+        "sort_by": "date",
+        "sort_order": "desc",
+    },
+    "search_documents_post": {
+        "q": "(agenda OR meeting) AND US",
+        "page": 1,
+        "page_size": 10,
+        "sort_by": "date",
+        "sort_order": "desc",
+    },
 }
 
 
@@ -69,7 +81,9 @@ def build_llm_context(client: BNClient) -> str:
 - search_links: q (required), page, page_size, sort_by, sort_order, from_, to_, language, sources, theme,
   content_type, has_documents, search_in, fields, url_contains, parent_url, dynamic_search (string for GET).
 - search_links_post: same idea; dynamic_search may be an object.
-- search_documents: keywords, keyword_operator (and|or), domains, doc_type, date_from, date_to, tags, link_id, page, size.
+- search_documents / search_documents_post: **q** (required, same boolean syntax as links), page, page_size,
+  sources, search_in, dynamic_search (string for GET), theme, document_type, from_, to_, url_contains,
+  parent_url, link_id, fields, sort_by, sort_order. NOT: keywords, keyword_operator, size, doc_type, date_from/date_to.
 - links_aggregations: facet (content_type|tags|entities|breadcrumbs|data_type), agg_size, from_, to_.
 - list_fields: index = links | documents.
 - check_health / explore: usually no arguments.
@@ -244,6 +258,7 @@ def main() -> None:
                     st.error("Arguments must be a JSON object.")
                 else:
                     try:
+                        args = normalize_mcp_arguments(mtool, args)
                         with st.spinner("Calling…"):
                             res = client.call_tool(mtool, args)
                         render_mcp_result(mtool, res)
