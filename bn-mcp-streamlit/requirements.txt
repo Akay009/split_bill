@@ -1,0 +1,7 @@
+streamlit
+httpx
+fastmcp
+openai
+anthropic
+pandas
+plotly
