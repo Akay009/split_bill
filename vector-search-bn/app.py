@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 import streamlit as st
@@ -8,7 +8,7 @@ from elasticsearch import Elasticsearch
 
 load_dotenv()
 
-st.set_page_config(page_title="Hybrid Search Demo", page_icon="🔎", layout="wide")
+st.set_page_config(page_title="Index Comparison Search UI", page_icon="🔎", layout="wide")
 
 
 def get_env(name: str, default: Optional[str] = None) -> Optional[str]:
@@ -16,18 +16,54 @@ def get_env(name: str, default: Optional[str] = None) -> Optional[str]:
     return value.strip() if isinstance(value, str) else value
 
 
+# -----------------------------
+# Config
+# -----------------------------
 HOST_ES = get_env("HOST_ES")
 ES_USERNAME = get_env("ES_USERNAME")
 ES_PASSWORD = get_env("ES_PASSWORD")
-ES_INDEX = get_env("ES_INDEX", "test-embeddings")
 EMBEDDING_API_URL = get_env("EMBEDDING_API_URL", "http://localhost:9001/qwen3")
 EMBEDDING_API_KEY = get_env("EMBEDDING_API_KEY", "test")
 REQUEST_TIMEOUT = int(get_env("REQUEST_TIMEOUT", "30"))
+
 DEFAULT_TOP_K = int(get_env("DEFAULT_TOP_K", "10"))
 DEFAULT_VECTOR_WEIGHT = float(get_env("DEFAULT_VECTOR_WEIGHT", "0.7"))
 DEFAULT_LEXICAL_WEIGHT = float(get_env("DEFAULT_LEXICAL_WEIGHT", "0.3"))
 DEFAULT_VECTOR_THRESHOLD = float(get_env("DEFAULT_VECTOR_THRESHOLD", "0.3"))
 DEFAULT_FINAL_THRESHOLD = float(get_env("DEFAULT_FINAL_THRESHOLD", "0.4"))
+
+INDEX_CONFIGS = {
+    "qwen-embeddings-v2": {
+        "label": "Full Markdown Index",
+        "index_name": "qwen-embeddings-v2",
+        "embedding_field": "embedding",
+        "text_field": "markdown",
+        "title_field": "meta_data_without_llm.title",
+        "content_field": "meta_data_without_llm.content",
+        "link_id_field": "link_id",
+        "url_field": "url",
+        "tags_field": "meta_data_with_llm.tags",
+        "entities_field": "meta_data_with_llm.entities",
+        "content_type_field": "meta_data_with_llm.content_type",
+        "chunk_index_field": None,
+        "chunk_total_field": None,
+    },
+    "test-embeddings-chunks": {
+        "label": "Chunked Markdown Index",
+        "index_name": "test-embeddings-chunks",
+        "embedding_field": "embedding",
+        "text_field": "markdown",
+        "title_field": "meta_data_without_llm.title",
+        "content_field": "meta_data_without_llm.content",
+        "link_id_field": "link_id",
+        "url_field": "url",
+        "tags_field": "meta_data_with_llm.tags",
+        "entities_field": "meta_data_with_llm.entities",
+        "content_type_field": "meta_data_with_llm.content_type",
+        "chunk_index_field": "chunk_index",
+        "chunk_total_field": "chunk_total"
+    },
+}
 
 
 @st.cache_resource
@@ -80,17 +116,54 @@ def normalize_scores(hits: List[Dict[str, Any]], score_key: str = "_score") -> L
     return hits
 
 
-def search_vector(es: Elasticsearch, query: str, size: int, vector_threshold: float) -> List[Dict[str, Any]]:
+def get_nested_value(data: Dict[str, Any], dotted_key: Optional[str], default: Any = None) -> Any:
+    if not dotted_key:
+        return default
+
+    current = data
+    for part in dotted_key.split("."):
+        if not isinstance(current, dict):
+            return default
+        current = current.get(part)
+        if current is None:
+            return default
+    return current
+
+
+def build_source_fields(index_cfg: Dict[str, Any]) -> List[str]:
+    fields = [
+        index_cfg["text_field"],
+        index_cfg["title_field"],
+        index_cfg["content_field"],
+        index_cfg["link_id_field"],
+        index_cfg["url_field"],
+        index_cfg["tags_field"],
+        index_cfg["entities_field"],
+        index_cfg["content_type_field"],
+    ]
+    if index_cfg.get("chunk_index_field"):
+        fields.append(index_cfg["chunk_index_field"])
+    if index_cfg.get("chunk_total_field"):
+        fields.append(index_cfg["chunk_total_field"])
+    return fields
+
+def search_vector(
+    es: Elasticsearch,
+    index_cfg: Dict[str, Any],
+    query: str,
+    size: int,
+    vector_threshold: float,
+) -> List[Dict[str, Any]]:
     query_vector = get_small_embedding_api(query)
 
     response = es.search(
-        index=ES_INDEX,
+        index=index_cfg["index_name"],
         body={
             "size": size,
-            "_source": ["text", "metadata"],
+            "_source": build_source_fields(index_cfg),
             "query": {
                 "knn": {
-                    "embedding": {
+                    index_cfg["embedding_field"]: {
                         "vector": query_vector,
                         "k": size,
                     }
@@ -105,19 +178,24 @@ def search_vector(es: Elasticsearch, query: str, size: int, vector_threshold: fl
     return hits
 
 
-def search_lexical(es: Elasticsearch, query: str, size: int) -> List[Dict[str, Any]]:
+def search_lexical(
+    es: Elasticsearch,
+    index_cfg: Dict[str, Any],
+    query: str,
+    size: int,
+) -> List[Dict[str, Any]]:
     response = es.search(
-        index=ES_INDEX,
+        index=index_cfg["index_name"],
         body={
             "size": size,
-            "_source": ["text", "metadata"],
+            "_source": build_source_fields(index_cfg),
             "query": {
                 "multi_match": {
                     "query": query,
                     "fields": [
-                        "text^2",
-                        "metadata.title^3",
-                        "metadata.content",
+                        f"{index_cfg['text_field']}^2",
+                        f"{index_cfg['title_field']}^3",
+                        index_cfg["content_field"],
                     ],
                     "type": "best_fields",
                     "operator": "or",
@@ -125,8 +203,8 @@ def search_lexical(es: Elasticsearch, query: str, size: int) -> List[Dict[str, A
             },
             "highlight": {
                 "fields": {
-                    "text": {},
-                    "metadata.content": {},
+                    index_cfg["text_field"]: {},
+                    index_cfg["content_field"]: {},
                 }
             },
         },
@@ -136,6 +214,7 @@ def search_lexical(es: Elasticsearch, query: str, size: int) -> List[Dict[str, A
 
 def search_hybrid(
     es: Elasticsearch,
+    index_cfg: Dict[str, Any],
     query: str,
     size: int,
     vector_threshold: float,
@@ -143,8 +222,8 @@ def search_hybrid(
     vector_weight: float,
     lexical_weight: float,
 ) -> List[Dict[str, Any]]:
-    vector_hits = normalize_scores(search_vector(es, query, size * 3, vector_threshold))
-    lexical_hits = normalize_scores(search_lexical(es, query, size * 3))
+    vector_hits = normalize_scores(search_vector(es, index_cfg, query, size * 3, vector_threshold))
+    lexical_hits = normalize_scores(search_lexical(es, index_cfg, query, size * 3))
 
     merged: Dict[str, Dict[str, Any]] = {}
 
@@ -187,27 +266,68 @@ def search_hybrid(
     return results[:size]
 
 
-def clean_preview(source: Dict[str, Any], limit: int = 450) -> str:
-    metadata = source.get("metadata", {}) or {}
-    text = source.get("text") or metadata.get("content") or ""
-    text = " ".join(str(text).split())
+def clean_preview(text: str, limit: int = 450) -> str:
+    text = " ".join(str(text or "").split())
     if len(text) > limit:
         return text[:limit].rstrip() + "..."
     return text
 
 
-def render_result(hit: Dict[str, Any], rank: int, mode: str) -> None:
+def extract_result_fields(hit: Dict[str, Any], index_cfg: Dict[str, Any]) -> Dict[str, Any]:
     source = hit.get("_source", {}) or {}
-    metadata = source.get("metadata", {}) or {}
-    title = metadata.get("title") or f"Result {rank}"
-    link_id = metadata.get("link_id") or hit.get("_id", "-")
+
+    title = get_nested_value(source, index_cfg["title_field"], "Untitled")
+    content = get_nested_value(source, index_cfg["content_field"], "")
+    markdown = get_nested_value(source, index_cfg["text_field"], "")
+    link_id = get_nested_value(source, index_cfg["link_id_field"], hit.get("_id", "-"))
+    url = get_nested_value(source, index_cfg["url_field"], "")
+    tags = get_nested_value(source, index_cfg["tags_field"], []) or []
+    entities = get_nested_value(source, index_cfg["entities_field"], []) or []
+    content_type = get_nested_value(source, index_cfg["content_type_field"], "")
+    chunk_index = get_nested_value(source, index_cfg.get("chunk_index_field"))
+    chunk_total = get_nested_value(source, index_cfg.get("chunk_total_field"))
+
+    preview = content or markdown or title
+
+    raw_view = {
+        "title": title,
+        "content": content,
+        "tags": tags,
+        "entities": entities,
+        "content_type": content_type,
+    }
+
+    return {
+        "title": title,
+        "content": content,
+        "markdown": markdown,
+        "link_id": link_id,
+        "url": url,
+        "tags": tags,
+        "entities": entities,
+        "content_type": content_type,
+        "chunk_index": chunk_index,
+        "chunk_total": chunk_total,
+        "preview": clean_preview(preview),
+        "raw_view": raw_view,
+        "source": source,
+    }
+
+def render_result(hit: Dict[str, Any], rank: int, mode: str, index_cfg: Dict[str, Any]) -> None:
+    parsed = extract_result_fields(hit, index_cfg)
 
     with st.container(border=True):
         col1, col2 = st.columns([5, 2])
 
         with col1:
-            st.subheader(f"{rank}. {title}")
-            st.caption(f"ID: {link_id}")
+            st.subheader(f"{rank}. {parsed['title']}")
+            st.caption(f"Link ID: {parsed['link_id']}")
+
+            if parsed["url"]:
+                st.caption(parsed["url"])
+
+            if parsed["chunk_index"] is not None and parsed["chunk_total"] is not None:
+                st.caption(f"Chunk: {parsed['chunk_index'] + 1} / {parsed['chunk_total']}")
 
         with col2:
             if mode == "Hybrid":
@@ -222,18 +342,61 @@ def render_result(hit: Dict[str, Any], rank: int, mode: str) -> None:
             s3.metric("Lexical raw", f"{hit.get('lexical_score', 0.0):.4f}")
             s4.metric("Lexical norm", f"{hit.get('lexical_norm', 0.0):.4f}")
 
-        st.write(clean_preview(source))
+        st.write(parsed["preview"])
 
-        with st.expander("Metadata"):
-            st.json(metadata)
+        with st.expander("Raw fields"):
+            st.json(parsed["raw_view"])
+
+
+def run_search_for_index(
+    es: Elasticsearch,
+    index_cfg: Dict[str, Any],
+    search_mode: str,
+    query: str,
+    top_k: int,
+    vector_threshold: float,
+    final_threshold: float,
+    vector_weight: float,
+    lexical_weight: float,
+) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    try:
+        if search_mode == "Vector":
+            results = search_vector(es, index_cfg, query, top_k, vector_threshold)
+        elif search_mode == "Lexical":
+            results = search_lexical(es, index_cfg, query, top_k)
+        else:
+            results = search_hybrid(
+                es=es,
+                index_cfg=index_cfg,
+                query=query,
+                size=top_k,
+                vector_threshold=vector_threshold,
+                final_threshold=final_threshold,
+                vector_weight=vector_weight,
+                lexical_weight=lexical_weight,
+            )
+        return results, None
+    except Exception as exc:
+        return [], str(exc)
 
 
 def main() -> None:
-    st.title("🔎 OpenSearch Search UI")
-    st.write("Choose search type from the left side. Only required filters will appear.")
+    st.title("🔎 Index Comparison Search UI")
+    st.write("Compare results from full-markdown index and chunked-markdown index side by side.")
 
     with st.sidebar:
         st.header("Search settings")
+
+        compare_mode = st.checkbox("Compare both indexes", value=True)
+
+        if not compare_mode:
+            selected_index_name = st.selectbox(
+                "Choose index",
+                list(INDEX_CONFIGS.keys()),
+                format_func=lambda x: f"{INDEX_CONFIGS[x]['label']} ({x})",
+            )
+        else:
+            selected_index_name = None
 
         search_mode = st.selectbox(
             "Search type",
@@ -251,7 +414,7 @@ def main() -> None:
                 min_value=1,
                 max_value=50,
                 value=DEFAULT_TOP_K,
-                help="How many results to show. Min: 1, Max: 50, Recommended: 5 to 15.",
+                help="How many results to show. Min: 1, Max: 50.",
             )
 
             vector_threshold = st.number_input(
@@ -260,7 +423,7 @@ def main() -> None:
                 max_value=2.0,
                 value=DEFAULT_VECTOR_THRESHOLD,
                 step=0.05,
-                help="Minimum vector score to keep a result. Min: 0.0, Max: 2.0, Recommended: 0.2 to 1.0.",
+                help="Remove weak meaning matches before combining scores.",
             )
 
             final_threshold = st.number_input(
@@ -269,7 +432,7 @@ def main() -> None:
                 max_value=1.0,
                 value=DEFAULT_FINAL_THRESHOLD,
                 step=0.05,
-                help="Minimum final hybrid score to keep a result. Min: 0.0, Max: 1.0, Recommended: 0.3 to 0.8.",
+                help="Remove weak final hybrid results after combining vector and lexical scores.",
             )
 
             vector_weight = st.slider(
@@ -278,7 +441,7 @@ def main() -> None:
                 max_value=1.0,
                 value=DEFAULT_VECTOR_WEIGHT,
                 step=0.05,
-                help="How much meaning matters in hybrid. Min: 0.0, Max: 1.0, Recommended: 0.6 to 0.8.",
+                help="How much meaning matters in hybrid.",
             )
 
             lexical_weight = st.slider(
@@ -287,7 +450,7 @@ def main() -> None:
                 max_value=1.0,
                 value=DEFAULT_LEXICAL_WEIGHT,
                 step=0.05,
-                help="How much exact words matter in hybrid. Min: 0.0, Max: 1.0, Recommended: 0.2 to 0.4.",
+                help="How much exact words matter in hybrid.",
             )
 
             total_weight = vector_weight + lexical_weight
@@ -295,17 +458,6 @@ def main() -> None:
                 st.warning("Keep Vector weight + Lexical weight = 1.0")
             else:
                 st.success("Good: weights add up to 1.0")
-
-            st.markdown(
-                """
-**Meaning**
-- **Top K** = number of results
-- **Vector threshold** = remove weak meaning matches first
-- **Final threshold** = remove weak final hybrid results
-- **Vector weight** = importance of meaning
-- **Lexical weight** = importance of exact words
-                """
-            )
 
         elif search_mode == "Vector":
             st.info("Vector = meaning search only.")
@@ -315,7 +467,7 @@ def main() -> None:
                 min_value=1,
                 max_value=50,
                 value=DEFAULT_TOP_K,
-                help="How many results to show. Min: 1, Max: 50, Recommended: 5 to 15.",
+                help="How many results to show. Min: 1, Max: 50.",
             )
 
             vector_threshold = st.number_input(
@@ -324,20 +476,12 @@ def main() -> None:
                 max_value=2.0,
                 value=DEFAULT_VECTOR_THRESHOLD,
                 step=0.05,
-                help="Minimum vector score to keep a result. Min: 0.0, Max: 2.0, Recommended: 0.2 to 1.0.",
+                help="Remove weak meaning matches.",
             )
 
             final_threshold = 0.0
             vector_weight = 1.0
             lexical_weight = 0.0
-
-            st.markdown(
-                """
-**Meaning**
-- **Top K** = number of results
-- **Vector threshold** = remove weak meaning matches
-                """
-            )
 
         else:
             st.info("Lexical = exact word search only.")
@@ -347,7 +491,7 @@ def main() -> None:
                 min_value=1,
                 max_value=50,
                 value=DEFAULT_TOP_K,
-                help="How many results to show. Min: 1, Max: 50, Recommended: 5 to 15.",
+                help="How many results to show. Min: 1, Max: 50.",
             )
 
             vector_threshold = 0.0
@@ -355,17 +499,17 @@ def main() -> None:
             vector_weight = 0.0
             lexical_weight = 1.0
 
-            st.markdown(
-                """
-**Meaning**
-- **Top K** = number of results
-- No threshold or weight needed for lexical search
-                """
-            )
-
         st.divider()
-        st.caption(f"Index: {ES_INDEX}")
-        st.caption(f"Embedding endpoint: {EMBEDDING_API_URL}")
+        st.markdown(
+            """
+**What the filters mean**
+- **Top K** = how many results to show
+- **Vector threshold** = remove weak meaning matches
+- **Final threshold** = remove weak final hybrid results
+- **Vector weight** = importance of meaning
+- **Lexical weight** = importance of exact words
+            """
+        )
 
     with st.expander("What each search type means"):
         st.markdown(
@@ -377,11 +521,11 @@ Uses **meaning + exact words**. Best default.
 Uses **meaning only**. Good for natural language search.
 
 ### Lexical
-Uses **exact words only**. Good for names, ids, tags, and strict keywords.
+Uses **exact words only**. Good for names, tags, ids, and strict keyword matching.
             """
         )
 
-    query = st.text_input("Enter your query", placeholder="e.g. Law meetings in USA")
+    query = st.text_input("Enter your query", placeholder="e.g. agenda meetings")
     run_search = st.button("Search", type="primary", use_container_width=True)
 
     if not query:
@@ -392,33 +536,91 @@ Uses **exact words only**. Good for names, ids, tags, and strict keywords.
         try:
             es = get_es_client()
 
-            with st.spinner("Searching..."):
-                if search_mode == "Vector":
-                    results = search_vector(es, query, top_k, vector_threshold)
-                elif search_mode == "Lexical":
-                    results = search_lexical(es, query, top_k)
-                else:
-                    results = search_hybrid(
+            if compare_mode:
+                left_index = INDEX_CONFIGS["qwen-embeddings-v2"]
+                right_index = INDEX_CONFIGS["test-embeddings-chunks"]
+
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    st.subheader(f"{left_index['label']}")
+                    st.caption(left_index["index_name"])
+
+                    results, error = run_search_for_index(
                         es=es,
+                        index_cfg=left_index,
+                        search_mode=search_mode,
                         query=query,
-                        size=top_k,
+                        top_k=top_k,
                         vector_threshold=vector_threshold,
                         final_threshold=final_threshold,
                         vector_weight=vector_weight,
                         lexical_weight=lexical_weight,
                     )
 
-            st.success(f"Found {len(results)} result(s)")
+                    if error:
+                        st.error(f"Search failed on {left_index['index_name']}: {error}")
+                    else:
+                        st.success(f"Found {len(results)} result(s)")
+                        if not results:
+                            st.warning("No results found.")
+                        for idx, hit in enumerate(results, start=1):
+                            render_result(hit, idx, search_mode, left_index)
 
-            if not results:
-                st.warning("No results matched your filters.")
-                return
+                with col2:
+                    st.subheader(f"{right_index['label']}")
+                    st.caption(right_index["index_name"])
 
-            for idx, hit in enumerate(results, start=1):
-                render_result(hit, idx, search_mode)
+                    results, error = run_search_for_index(
+                        es=es,
+                        index_cfg=right_index,
+                        search_mode=search_mode,
+                        query=query,
+                        top_k=top_k,
+                        vector_threshold=vector_threshold,
+                        final_threshold=final_threshold,
+                        vector_weight=vector_weight,
+                        lexical_weight=lexical_weight,
+                    )
 
-            with st.expander("Raw response preview"):
-                st.json(results)
+                    if error:
+                        st.error(f"Search failed on {right_index['index_name']}: {error}")
+                    else:
+                        st.success(f"Found {len(results)} result(s)")
+                        if not results:
+                            st.warning("No results found.")
+                        for idx, hit in enumerate(results, start=1):
+                            render_result(hit, idx, search_mode, right_index)
+
+            else:
+                index_cfg = INDEX_CONFIGS[selected_index_name]
+
+                st.subheader(index_cfg["label"])
+                st.caption(index_cfg["index_name"])
+
+                results, error = run_search_for_index(
+                    es=es,
+                    index_cfg=index_cfg,
+                    search_mode=search_mode,
+                    query=query,
+                    top_k=top_k,
+                    vector_threshold=vector_threshold,
+                    final_threshold=final_threshold,
+                    vector_weight=vector_weight,
+                    lexical_weight=lexical_weight,
+                )
+
+                if error:
+                    st.error(f"Search failed on {index_cfg['index_name']}: {error}")
+                    return
+
+                st.success(f"Found {len(results)} result(s)")
+                if not results:
+                    st.warning("No results found.")
+                    return
+
+                for idx, hit in enumerate(results, start=1):
+                    render_result(hit, idx, search_mode, index_cfg)
 
         except Exception as exc:
             st.error(f"Search failed: {exc}")
