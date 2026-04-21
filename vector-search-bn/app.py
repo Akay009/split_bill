@@ -16,9 +16,6 @@ def get_env(name: str, default: Optional[str] = None) -> Optional[str]:
     return value.strip() if isinstance(value, str) else value
 
 
-# -----------------------------
-# Config
-# -----------------------------
 HOST_ES = get_env("HOST_ES")
 ES_USERNAME = get_env("ES_USERNAME")
 ES_PASSWORD = get_env("ES_PASSWORD")
@@ -61,7 +58,22 @@ INDEX_CONFIGS = {
         "entities_field": "meta_data_with_llm.entities",
         "content_type_field": "meta_data_with_llm.content_type",
         "chunk_index_field": "chunk_index",
-        "chunk_total_field": "chunk_total"
+        "chunk_total_field": "chunk_total",
+    },
+    "clean-embeddings": {
+        "label": "Clean Embedding Index",
+        "index_name": "clean-embeddings",
+        "embedding_field": "embedding",
+        "text_field": "markdown",
+        "title_field": "meta_data_without_llm.title",
+        "content_field": "meta_data_without_llm.content",
+        "link_id_field": "link_id",
+        "url_field": "url",
+        "tags_field": "meta_data_with_llm.tags",
+        "entities_field": "meta_data_with_llm.entities",
+        "content_type_field": "meta_data_with_llm.content_type",
+        "chunk_index_field": None,
+        "chunk_total_field": None,
     },
 }
 
@@ -77,6 +89,7 @@ def get_es_client() -> Elasticsearch:
         timeout=REQUEST_TIMEOUT,
         headers={"Content-Type": "application/json"},
     )
+
 
 
 def get_small_embedding_api(text: str, emb_type: str = "query") -> List[float]:
@@ -98,6 +111,7 @@ def get_small_embedding_api(text: str, emb_type: str = "query") -> List[float]:
     return [round(float(elem), 4) for elem in embs]
 
 
+
 def normalize_scores(hits: List[Dict[str, Any]], score_key: str = "_score") -> List[Dict[str, Any]]:
     if not hits:
         return hits
@@ -116,6 +130,7 @@ def normalize_scores(hits: List[Dict[str, Any]], score_key: str = "_score") -> L
     return hits
 
 
+
 def get_nested_value(data: Dict[str, Any], dotted_key: Optional[str], default: Any = None) -> Any:
     if not dotted_key:
         return default
@@ -128,6 +143,7 @@ def get_nested_value(data: Dict[str, Any], dotted_key: Optional[str], default: A
         if current is None:
             return default
     return current
+
 
 
 def build_source_fields(index_cfg: Dict[str, Any]) -> List[str]:
@@ -146,6 +162,8 @@ def build_source_fields(index_cfg: Dict[str, Any]) -> List[str]:
     if index_cfg.get("chunk_total_field"):
         fields.append(index_cfg["chunk_total_field"])
     return fields
+
+
 
 def search_vector(
     es: Elasticsearch,
@@ -178,6 +196,7 @@ def search_vector(
     return hits
 
 
+
 def search_lexical(
     es: Elasticsearch,
     index_cfg: Dict[str, Any],
@@ -193,12 +212,16 @@ def search_lexical(
                 "multi_match": {
                     "query": query,
                     "fields": [
+                        f"{index_cfg['title_field']}^5",
+                        f"{index_cfg['content_field']}^3",
                         f"{index_cfg['text_field']}^2",
-                        f"{index_cfg['title_field']}^3",
-                        index_cfg["content_field"],
+                        f"{index_cfg['tags_field']}^4",
+                        f"{index_cfg['entities_field']}^4",
+                        f"{index_cfg['content_type_field']}^2",
+                        f"{index_cfg['url_field']}.fulltext^2",
                     ],
                     "type": "best_fields",
-                    "operator": "or",
+                    "operator": "and",
                 }
             },
             "highlight": {
@@ -210,6 +233,7 @@ def search_lexical(
         },
     )
     return response.get("hits", {}).get("hits", [])
+
 
 
 def search_hybrid(
@@ -266,11 +290,13 @@ def search_hybrid(
     return results[:size]
 
 
+
 def clean_preview(text: str, limit: int = 450) -> str:
     text = " ".join(str(text or "").split())
     if len(text) > limit:
         return text[:limit].rstrip() + "..."
     return text
+
 
 
 def extract_result_fields(hit: Dict[str, Any], index_cfg: Dict[str, Any]) -> Dict[str, Any]:
@@ -313,6 +339,8 @@ def extract_result_fields(hit: Dict[str, Any], index_cfg: Dict[str, Any]) -> Dic
         "source": source,
     }
 
+
+
 def render_result(hit: Dict[str, Any], rank: int, mode: str, index_cfg: Dict[str, Any]) -> None:
     parsed = extract_result_fields(hit, index_cfg)
 
@@ -348,6 +376,7 @@ def render_result(hit: Dict[str, Any], rank: int, mode: str, index_cfg: Dict[str
             st.json(parsed["raw_view"])
 
 
+
 def run_search_for_index(
     es: Elasticsearch,
     index_cfg: Dict[str, Any],
@@ -380,14 +409,55 @@ def run_search_for_index(
         return [], str(exc)
 
 
+
+def render_index_column(
+    es: Elasticsearch,
+    index_cfg: Dict[str, Any],
+    search_mode: str,
+    query: str,
+    top_k: int,
+    vector_threshold: float,
+    final_threshold: float,
+    vector_weight: float,
+    lexical_weight: float,
+) -> None:
+    st.subheader(index_cfg["label"])
+    st.caption(index_cfg["index_name"])
+
+    results, error = run_search_for_index(
+        es=es,
+        index_cfg=index_cfg,
+        search_mode=search_mode,
+        query=query,
+        top_k=top_k,
+        vector_threshold=vector_threshold,
+        final_threshold=final_threshold,
+        vector_weight=vector_weight,
+        lexical_weight=lexical_weight,
+    )
+
+    if error:
+        st.error(f"Search failed on {index_cfg['index_name']}: {error}")
+        return
+
+    st.success(f"Found {len(results)} result(s)")
+    if not results:
+        st.warning("No results found.")
+        return
+
+    for idx, hit in enumerate(results, start=1):
+        render_result(hit, idx, search_mode, index_cfg)
+
+
+
 def main() -> None:
     st.title("🔎 Index Comparison Search UI")
-    st.write("Compare results from full-markdown index and chunked-markdown index side by side.")
+    st.write("Compare results from full-markdown, chunked, and clean-embedding indexes.")
 
     with st.sidebar:
         st.header("Search settings")
 
-        compare_mode = st.checkbox("Compare both indexes", value=True)
+        compare_mode = st.checkbox("Compare all indexes", value=True)
 
         if not compare_mode:
             selected_index_name = st.selectbox(
@@ -537,68 +607,30 @@ Uses **exact words only**. Good for names, tags, ids, and strict keyword matchin
             es = get_es_client()
 
             if compare_mode:
-                left_index = INDEX_CONFIGS["qwen-embeddings-v2"]
-                right_index = INDEX_CONFIGS["test-embeddings-chunks"]
+                compare_indexes = [
+                    INDEX_CONFIGS["qwen-embeddings-v2"],
+                    INDEX_CONFIGS["test-embeddings-chunks"],
+                    INDEX_CONFIGS["clean-embeddings"],
+                ]
 
-                col1, col2 = st.columns(2)
-
-                with col1:
-                    st.subheader(f"{left_index['label']}")
-                    st.caption(left_index["index_name"])
-
-                    results, error = run_search_for_index(
-                        es=es,
-                        index_cfg=left_index,
-                        search_mode=search_mode,
-                        query=query,
-                        top_k=top_k,
-                        vector_threshold=vector_threshold,
-                        final_threshold=final_threshold,
-                        vector_weight=vector_weight,
-                        lexical_weight=lexical_weight,
-                    )
-
-                    if error:
-                        st.error(f"Search failed on {left_index['index_name']}: {error}")
-                    else:
-                        st.success(f"Found {len(results)} result(s)")
-                        if not results:
-                            st.warning("No results found.")
-                        for idx, hit in enumerate(results, start=1):
-                            render_result(hit, idx, search_mode, left_index)
-
-                with col2:
-                    st.subheader(f"{right_index['label']}")
-                    st.caption(right_index["index_name"])
-
-                    results, error = run_search_for_index(
-                        es=es,
-                        index_cfg=right_index,
-                        search_mode=search_mode,
-                        query=query,
-                        top_k=top_k,
-                        vector_threshold=vector_threshold,
-                        final_threshold=final_threshold,
-                        vector_weight=vector_weight,
-                        lexical_weight=lexical_weight,
-                    )
-
-                    if error:
-                        st.error(f"Search failed on {right_index['index_name']}: {error}")
-                    else:
-                        st.success(f"Found {len(results)} result(s)")
-                        if not results:
-                            st.warning("No results found.")
-                        for idx, hit in enumerate(results, start=1):
-                            render_result(hit, idx, search_mode, right_index)
+                cols = st.columns(len(compare_indexes))
+                for col, index_cfg in zip(cols, compare_indexes):
+                    with col:
+                        render_index_column(
+                            es=es,
+                            index_cfg=index_cfg,
+                            search_mode=search_mode,
+                            query=query,
+                            top_k=top_k,
+                            vector_threshold=vector_threshold,
+                            final_threshold=final_threshold,
+                            vector_weight=vector_weight,
+                            lexical_weight=lexical_weight,
+                        )
 
             else:
                 index_cfg = INDEX_CONFIGS[selected_index_name]
-
-                st.subheader(index_cfg["label"])
-                st.caption(index_cfg["index_name"])
-
-                results, error = run_search_for_index(
+                render_index_column(
                     es=es,
                     index_cfg=index_cfg,
                     search_mode=search_mode,
@@ -609,18 +641,6 @@ Uses **exact words only**. Good for names, tags, ids, and strict keyword matchin
                     vector_weight=vector_weight,
                     lexical_weight=lexical_weight,
                 )
-
-                if error:
-                    st.error(f"Search failed on {index_cfg['index_name']}: {error}")
-                    return
-
-                st.success(f"Found {len(results)} result(s)")
-                if not results:
-                    st.warning("No results found.")
-                    return
-
-                for idx, hit in enumerate(results, start=1):
-                    render_result(hit, idx, search_mode, index_cfg)
 
         except Exception as exc:
             st.error(f"Search failed: {exc}")
